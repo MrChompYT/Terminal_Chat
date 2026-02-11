@@ -11,6 +11,7 @@ Runs on both machines:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import queue
 import random
@@ -305,18 +306,59 @@ class TerminalUI:
         self.root.destroy()
 
 
+def prompt_server_ip(port: int) -> str:
+    while True:
+        raw = input(f"Server LAN IP (port {port}): ").strip()
+        try:
+            ipaddress.ip_address(raw)
+        except ValueError:
+            print("[ERROR] Enter a valid IPv4/IPv6 address, e.g. 192.168.1.44")
+            continue
+        if check_server_reachable(raw, port):
+            print(f"[OK] Server reachable at {raw}:{port}")
+            return raw
+        print(f"[ERROR] Could not connect to {raw}:{port}. Is the server running?")
+
+
+def prompt_username() -> str:
+    while True:
+        name = input("Username: ").strip()
+        if not name:
+            print("[ERROR] Username cannot be empty.")
+            continue
+        if len(name) > 24:
+            print("[ERROR] Username must be 24 characters or fewer.")
+            continue
+        return name
+
+
+def check_server_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Terminal Chat Tkinter client")
-    parser.add_argument("--host", required=True, help="Server host or tunnel host")
-    parser.add_argument("--port", required=True, type=int, help="Server port")
-    parser.add_argument("--name", default="OPERATOR", help="Display name")
+    parser.add_argument("--host", help="Server host/IP (optional; prompts if omitted)")
+    parser.add_argument("--port", default=5050, type=int, help="Server port")
+    parser.add_argument("--name", help="Display name (optional; prompts if omitted)")
     parser.add_argument("--director", action="store_true", help="Enable director controls")
     args = parser.parse_args()
 
+    host = args.host or prompt_server_ip(args.port)
+    if not check_server_reachable(host, args.port):
+        print(f"[ERROR] Could not reach server at {host}:{args.port}")
+        return
+
+    name = args.name or prompt_username()
+
     root = tk.Tk()
-    net = NetworkClient(args.host, args.port, args.name)
+    net = NetworkClient(host, args.port, name)
     net.start()
-    TerminalUI(root, net, args.name, director=args.director)
+    TerminalUI(root, net, name, director=args.director)
     root.mainloop()
 
 

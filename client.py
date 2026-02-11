@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import math
 import queue
 import random
 import socket
@@ -125,6 +126,10 @@ class TerminalUI:
         self.crash_timer_job: Optional[str] = None
         self.crash_anim_job: Optional[str] = None
         self.crash_seconds_left = 0
+        self.portal_active = False
+        self.portal_anim_job: Optional[str] = None
+        self.portal_close_job: Optional[str] = None
+        self.portal_phase = 0.0
 
         self.root.title("Terminal Chat")
         self.root.geometry("960x620")
@@ -152,6 +157,7 @@ class TerminalUI:
         if self.director:
             self._build_director_panel(frame)
         self._build_crash_overlay(frame)
+        self._build_portal_overlay(frame)
 
         self.root.bind("<Return>", self._on_enter)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -248,6 +254,21 @@ class TerminalUI:
         )
         self.crash_hint.pack(pady=4)
 
+    def _build_portal_overlay(self, parent: ttk.Frame) -> None:
+        self.portal_overlay = tk.Frame(parent, bg="#050608")
+        self.portal_canvas = tk.Canvas(
+            self.portal_overlay, bg="#050608", highlightthickness=0, bd=0
+        )
+        self.portal_canvas.pack(fill="both", expand=True)
+        self.portal_text = self.portal_canvas.create_text(
+            0,
+            0,
+            text="",
+            fill="#f7c266",
+            font=("Consolas", 16, "bold"),
+            anchor="center",
+        )
+
     def _inject(self, kind: str) -> None:
         if kind == "system":
             self.net.send({"type": "system", "text": "SECURITY TRACE FLAGGED", "time": self._ts()})
@@ -322,6 +343,19 @@ class TerminalUI:
             elif action == "recover":
                 self._stop_fake_crash(str(event.get("text", "Session recovered.")))
             return
+        if kind == "portal":
+            action = str(event.get("action", "open")).lower()
+            if action == "open":
+                seconds = int(event.get("seconds", 6))
+                text = str(
+                    event.get(
+                        "text", "Let's see how well you survive your own creation."
+                    )
+                )
+                self._start_portal_effect(text, seconds)
+            elif action == "close":
+                self._stop_portal_effect()
+            return
         if kind == "typing":
             who = str(event.get("from", "REMOTE"))
             self.typing_flags[who] = bool(event.get("state", False))
@@ -392,8 +426,9 @@ class TerminalUI:
             self.crash_anim_job = None
         self.crashed = False
         self.crash_overlay.place_forget()
-        self.entry.configure(state="normal")
-        self.entry.focus_set()
+        if not self.portal_active:
+            self.entry.configure(state="normal")
+            self.entry.focus_set()
         self._append_with_effect(f"[{self._ts()}] [SYS] {note}", "system")
 
     def _tick_crash_timer(self) -> None:
@@ -419,6 +454,75 @@ class TerminalUI:
         self.crash_noise.configure(text=" :: ".join(chunks))
         self.crash_anim_job = self.root.after(90, self._animate_crash_noise)
 
+    def _start_portal_effect(self, text: str, seconds: int) -> None:
+        if self.crashed:
+            return
+        if self.portal_close_job:
+            self.root.after_cancel(self.portal_close_job)
+            self.portal_close_job = None
+        if self.portal_anim_job:
+            self.root.after_cancel(self.portal_anim_job)
+            self.portal_anim_job = None
+        self.portal_active = True
+        self.portal_phase = 0.0
+        self.entry.configure(state="disabled")
+        self.portal_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.portal_canvas.update_idletasks()
+        w = self.portal_canvas.winfo_width()
+        h = self.portal_canvas.winfo_height()
+        self.portal_canvas.coords(self.portal_text, w / 2, h * 0.82)
+        self.portal_canvas.itemconfigure(self.portal_text, text=text)
+        self._animate_portal()
+        hold_ms = max(2000, min(15000, seconds * 1000))
+        self.portal_close_job = self.root.after(hold_ms, self._stop_portal_effect)
+
+    def _animate_portal(self) -> None:
+        if not self.portal_active:
+            return
+        self.portal_canvas.delete("portal_ring")
+        w = max(10, self.portal_canvas.winfo_width())
+        h = max(10, self.portal_canvas.winfo_height())
+        cx = w / 2
+        cy = h / 2
+        self.portal_phase += 0.23
+        pulse = (1 + (0.5 * (1 + math.sin(self.portal_phase)))) * 0.28
+        base_r = min(w, h) * pulse
+        for i in range(8):
+            rr = base_r + i * 18
+            shade = 255 - i * 22
+            color = f"#{0:02x}{max(40, shade):02x}{max(70, shade):02x}"
+            self.portal_canvas.create_oval(
+                cx - rr,
+                cy - rr,
+                cx + rr,
+                cy + rr,
+                outline=color,
+                width=2,
+                tags="portal_ring",
+            )
+        self.portal_canvas.create_text(
+            cx,
+            cy,
+            text="PORTAL ONLINE",
+            fill="#d5f6de",
+            font=("Consolas", 22, "bold"),
+            tags="portal_ring",
+        )
+        self.portal_anim_job = self.root.after(45, self._animate_portal)
+
+    def _stop_portal_effect(self) -> None:
+        if self.portal_close_job:
+            self.root.after_cancel(self.portal_close_job)
+            self.portal_close_job = None
+        if self.portal_anim_job:
+            self.root.after_cancel(self.portal_anim_job)
+            self.portal_anim_job = None
+        self.portal_active = False
+        self.portal_overlay.place_forget()
+        if not self.crashed:
+            self.entry.configure(state="normal")
+            self.entry.focus_set()
+
     @staticmethod
     def _ts() -> str:
         return time.strftime("%H:%M:%S")
@@ -428,6 +532,10 @@ class TerminalUI:
             self.root.after_cancel(self.crash_timer_job)
         if self.crash_anim_job:
             self.root.after_cancel(self.crash_anim_job)
+        if self.portal_anim_job:
+            self.root.after_cancel(self.portal_anim_job)
+        if self.portal_close_job:
+            self.root.after_cancel(self.portal_close_job)
         self.net.stop()
         self.root.destroy()
 

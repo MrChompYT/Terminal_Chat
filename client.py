@@ -121,6 +121,10 @@ class TerminalUI:
         self.name = name
         self.director = director
         self.typing_flags: dict[str, bool] = {}
+        self.crashed = False
+        self.crash_timer_job: Optional[str] = None
+        self.crash_anim_job: Optional[str] = None
+        self.crash_seconds_left = 0
 
         self.root.title("Terminal Chat")
         self.root.geometry("960x620")
@@ -140,12 +144,14 @@ class TerminalUI:
 
         frame = ttk.Frame(root, style="Main.TFrame", padding=8)
         frame.pack(fill="both", expand=True)
+        self.main_frame = frame
 
         self._build_chrome(frame)
         self._build_terminal(frame)
         self._build_input(frame)
         if self.director:
             self._build_director_panel(frame)
+        self._build_crash_overlay(frame)
 
         self.root.bind("<Return>", self._on_enter)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -207,6 +213,41 @@ class TerminalUI:
         ttk.Button(panel, text="Demo Sequence", command=self._run_demo_sequence).pack(side="left", padx=4)
         self.remote_typing = False
 
+    def _build_crash_overlay(self, parent: ttk.Frame) -> None:
+        self.crash_overlay = tk.Frame(parent, bg="#050608")
+        self.crash_title = tk.Label(
+            self.crash_overlay,
+            text="PROCESS TERMINATED",
+            fg="#ff5050",
+            bg="#050608",
+            font=("Consolas", 26, "bold"),
+        )
+        self.crash_title.pack(pady=(140, 12))
+        self.crash_detail = tk.Label(
+            self.crash_overlay,
+            text="",
+            fg="#f7c266",
+            bg="#050608",
+            font=("Consolas", 13),
+        )
+        self.crash_detail.pack(pady=4)
+        self.crash_noise = tk.Label(
+            self.crash_overlay,
+            text="",
+            fg="#ff6b6b",
+            bg="#050608",
+            font=("Consolas", 11),
+        )
+        self.crash_noise.pack(pady=6)
+        self.crash_hint = tk.Label(
+            self.crash_overlay,
+            text="",
+            fg="#9fb9c2",
+            bg="#050608",
+            font=("Consolas", 11),
+        )
+        self.crash_hint.pack(pady=4)
+
     def _inject(self, kind: str) -> None:
         if kind == "system":
             self.net.send({"type": "system", "text": "SECURITY TRACE FLAGGED", "time": self._ts()})
@@ -226,10 +267,21 @@ class TerminalUI:
                 {"type": "chat", "from": "REMOTE", "text": "you shouldn't be here", "time": self._ts()},
                 {"type": "typing", "from": "REMOTE", "state": False, "time": self._ts()},
                 {"type": "glitch", "text": "IO-FAILURE x9x9x9", "time": self._ts()},
+                {
+                    "type": "crash",
+                    "action": "start",
+                    "seconds": 5,
+                    "reason": "CLIENT RUNTIME FAILURE",
+                    "time": self._ts(),
+                },
+                {"type": "crash", "action": "recover", "text": "Runtime restored.", "time": self._ts()},
             ]
             for event in steps:
                 self.net.send(event)
-                time.sleep(0.9)
+                if event.get("type") == "crash" and event.get("action") == "start":
+                    time.sleep(int(event.get("seconds", 5)) + 0.2)
+                else:
+                    time.sleep(0.9)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -237,6 +289,8 @@ class TerminalUI:
         self._send_message()
 
     def _send_message(self) -> None:
+        if self.crashed:
+            return
         text = self.entry.get().strip()
         if not text:
             return
@@ -256,6 +310,18 @@ class TerminalUI:
     def _render_event(self, event: dict) -> None:
         kind = event.get("type", "chat")
         ts = event.get("time", self._ts())
+        if kind == "clear":
+            self._clear_terminal()
+            return
+        if kind == "crash":
+            action = str(event.get("action", "start")).lower()
+            if action == "start":
+                seconds = int(event.get("seconds", 6))
+                reason = str(event.get("reason", "FATAL ERROR"))
+                self._start_fake_crash(seconds, reason)
+            elif action == "recover":
+                self._stop_fake_crash(str(event.get("text", "Session recovered.")))
+            return
         if kind == "typing":
             who = str(event.get("from", "REMOTE"))
             self.typing_flags[who] = bool(event.get("state", False))
@@ -297,11 +363,71 @@ class TerminalUI:
             self._render_event(event)
         self.root.after(50, self._pump_incoming)
 
+    def _clear_terminal(self) -> None:
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.configure(state="disabled")
+
+    def _start_fake_crash(self, seconds: int, reason: str) -> None:
+        if self.crash_timer_job:
+            self.root.after_cancel(self.crash_timer_job)
+            self.crash_timer_job = None
+        if self.crash_anim_job:
+            self.root.after_cancel(self.crash_anim_job)
+            self.crash_anim_job = None
+        self.crashed = True
+        self.entry.configure(state="disabled")
+        self.crash_seconds_left = max(2, min(20, seconds))
+        self.crash_detail.configure(text=reason)
+        self.crash_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._animate_crash_noise()
+        self._tick_crash_timer()
+
+    def _stop_fake_crash(self, note: str) -> None:
+        if self.crash_timer_job:
+            self.root.after_cancel(self.crash_timer_job)
+            self.crash_timer_job = None
+        if self.crash_anim_job:
+            self.root.after_cancel(self.crash_anim_job)
+            self.crash_anim_job = None
+        self.crashed = False
+        self.crash_overlay.place_forget()
+        self.entry.configure(state="normal")
+        self.entry.focus_set()
+        self._append_with_effect(f"[{self._ts()}] [SYS] {note}", "system")
+
+    def _tick_crash_timer(self) -> None:
+        if not self.crashed:
+            return
+        self.crash_hint.configure(
+            text=f"Attempting auto-recovery in {self.crash_seconds_left}s ..."
+        )
+        self.crash_seconds_left -= 1
+        if self.crash_seconds_left < 0:
+            self._stop_fake_crash("Session restored after crash.")
+            return
+        self.crash_timer_job = self.root.after(1000, self._tick_crash_timer)
+
+    def _animate_crash_noise(self) -> None:
+        if not self.crashed:
+            return
+        chunks = []
+        for _ in range(3):
+            chunks.append(
+                "".join(random.choice("0123456789ABCDEF#@$%") for _ in range(14))
+            )
+        self.crash_noise.configure(text=" :: ".join(chunks))
+        self.crash_anim_job = self.root.after(90, self._animate_crash_noise)
+
     @staticmethod
     def _ts() -> str:
         return time.strftime("%H:%M:%S")
 
     def _on_close(self) -> None:
+        if self.crash_timer_job:
+            self.root.after_cancel(self.crash_timer_job)
+        if self.crash_anim_job:
+            self.root.after_cancel(self.crash_anim_job)
         self.net.stop()
         self.root.destroy()
 

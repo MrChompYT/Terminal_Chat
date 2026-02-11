@@ -21,7 +21,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import ttk
-from typing import Optional
+from typing import Callable, Optional
 
 
 class NetworkClient:
@@ -130,6 +130,7 @@ class TerminalUI:
         self.portal_anim_job: Optional[str] = None
         self.portal_close_job: Optional[str] = None
         self.portal_phase = 0.0
+        self.sequence_jobs: list[str] = []
 
         self.root.title("Terminal Chat")
         self.root.geometry("960x620")
@@ -282,27 +283,9 @@ class TerminalUI:
 
     def _run_demo_sequence(self) -> None:
         def worker() -> None:
-            steps = [
-                {"type": "system", "text": "Handshake replay started...", "time": self._ts()},
-                {"type": "typing", "from": "REMOTE", "state": True, "time": self._ts()},
-                {"type": "chat", "from": "REMOTE", "text": "you shouldn't be here", "time": self._ts()},
-                {"type": "typing", "from": "REMOTE", "state": False, "time": self._ts()},
-                {"type": "glitch", "text": "IO-FAILURE x9x9x9", "time": self._ts()},
-                {
-                    "type": "crash",
-                    "action": "start",
-                    "seconds": 5,
-                    "reason": "CLIENT RUNTIME FAILURE",
-                    "time": self._ts(),
-                },
-                {"type": "crash", "action": "recover", "text": "Runtime restored.", "time": self._ts()},
-            ]
-            for event in steps:
-                self.net.send(event)
-                if event.get("type") == "crash" and event.get("action") == "start":
-                    time.sleep(int(event.get("seconds", 5)) + 0.2)
-                else:
-                    time.sleep(0.9)
+            self.net.send(
+                {"type": "sequence", "action": "director_protocol", "time": self._ts()}
+            )
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -356,6 +339,11 @@ class TerminalUI:
             elif action == "close":
                 self._stop_portal_effect()
             return
+        if kind == "sequence":
+            action = str(event.get("action", "director_protocol")).lower()
+            if action == "director_protocol":
+                self._start_director_protocol_sequence()
+            return
         if kind == "typing":
             who = str(event.get("from", "REMOTE"))
             self.typing_flags[who] = bool(event.get("state", False))
@@ -401,6 +389,70 @@ class TerminalUI:
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
         self.text.configure(state="disabled")
+
+    def _cancel_sequence_jobs(self) -> None:
+        for job in self.sequence_jobs:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        self.sequence_jobs.clear()
+
+    def _start_director_protocol_sequence(self) -> None:
+        self._cancel_sequence_jobs()
+        logo_lines = [
+            "      ███████████",
+            "   ███░░░░░░░░░░░███",
+            "  ██░░███░░░███░░░░██",
+            " ██░░███░░░░░███░░░░██",
+            "██░░███░░░██░░███░░░░██",
+            "██░░██░░█████░░██░░░░██",
+            "██░░██░░█████░░██░░░░██",
+            "██░░███░░░██░░███░░░░██",
+            " ██░░███░░░░░███░░░░██",
+            "  ██░░███░░███░░░░██",
+            "   ███░░░░░░░░░░███",
+            "      ███████████",
+        ]
+        glitch_pool = [
+            "010101110110",
+            "{#@$%}{#@$%}",
+            "SEGFAULT::0x4F2A9C",
+            "def _shadow_hook(...):",
+            "NULL PTR >>> STACK TRACE",
+            "RX_OVERRUN // BUS_NOISE",
+            "for i in range(9999): panic()",
+        ]
+        blink_frames = ["> _", ">  ", "> _", ">  ", "> _"]
+        actions: list[tuple[int, Callable[[], None]]] = [
+            (0, lambda: self._append_line("> INITIALIZING DIRECTOR.PROTOCOL", "system")),
+        ]
+        actions.append((500, lambda: None))
+        for _ in range(random.randint(7, 12)):
+            line = random.choice(glitch_pool)
+            actions.append((random.randint(50, 80), lambda text=line: self._append_line(text, "glitch")))
+        actions.append((200, self._clear_terminal))
+        for line in logo_lines:
+            actions.append((random.randint(60, 120), lambda text=line: self._append_line(text, "chat")))
+        actions.append((200, lambda: self._append_line("> IDENTITY: DIRECTOR", "system")))
+        actions.append((150, lambda: self._append_line("> STATUS: OBSERVING", "system")))
+        for frame in blink_frames:
+            actions.append((130, lambda text=frame: self._append_line(text, "meta")))
+        actions.append((280, lambda: self._append_line("I see you.", "chat")))
+
+        def run_step(index: int) -> None:
+            if index >= len(actions):
+                return
+            delay_ms, fn = actions[index]
+
+            def invoke() -> None:
+                fn()
+                run_step(index + 1)
+
+            job = self.root.after(delay_ms, invoke)
+            self.sequence_jobs.append(job)
+
+        run_step(0)
 
     def _start_fake_crash(self, seconds: int, reason: str) -> None:
         if self.crash_timer_job:
@@ -528,6 +580,7 @@ class TerminalUI:
         return time.strftime("%H:%M:%S")
 
     def _on_close(self) -> None:
+        self._cancel_sequence_jobs()
         if self.crash_timer_job:
             self.root.after_cancel(self.crash_timer_job)
         if self.crash_anim_job:

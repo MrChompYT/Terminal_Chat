@@ -51,7 +51,8 @@ class LaunchAgent:
 
     def _session(self) -> None:
         with socket.create_connection((self.server_host, self.server_port), timeout=6) as sock:
-            hello = json.dumps({"type": "hello", "name": self.agent_name}) + "\n"
+            sock.settimeout(None)
+            hello = json.dumps({"type": "hello", "name": self.agent_name, "role": "agent"}) + "\n"
             sock.sendall(hello.encode("utf-8"))
             file = sock.makefile("r", encoding="utf-8", newline="\n")
             print("[AGENT] Connected and waiting for /open cue.")
@@ -61,6 +62,7 @@ class LaunchAgent:
                 except json.JSONDecodeError:
                     continue
                 self._handle_event(event)
+        raise OSError("Server closed connection")
 
     def _handle_event(self, event: dict) -> None:
         if event.get("type") != "launch":
@@ -93,12 +95,12 @@ class LaunchAgent:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Remote launch agent for client.py")
-    parser.add_argument("--server-host", required=True, help="Server host/IP for cue channel")
+    parser.add_argument("--server-host", help="Server host/IP for cue channel")
     parser.add_argument("--server-port", type=int, default=5050, help="Server port for cue channel")
-    parser.add_argument("--agent-name", required=True, help="Unique agent name, e.g. HERO1_AGENT")
-    parser.add_argument("--chat-host", required=True, help="Host for launched client.py")
+    parser.add_argument("--agent-name", help="Unique agent name, e.g. HERO1_AGENT")
+    parser.add_argument("--chat-host", help="Host for launched client.py (defaults to server-host)")
     parser.add_argument("--chat-port", type=int, default=5050, help="Port for launched client.py")
-    parser.add_argument("--chat-name", required=True, help="Username for launched client.py")
+    parser.add_argument("--chat-name", help="Username for launched client.py")
     parser.add_argument(
         "--workdir",
         default=".",
@@ -106,16 +108,35 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    server_host = args.server_host or _prompt_required("Server host/IP")
+    agent_name = args.agent_name or _prompt_required("Agent name (example HERO1_AGENT)")
+    chat_host = args.chat_host or server_host
+    default_chat_name = agent_name.replace("_AGENT", "")
+    chat_name = args.chat_name or _prompt_default("Chat username", default_chat_name)
+
     agent = LaunchAgent(
-        server_host=args.server_host,
+        server_host=server_host,
         server_port=args.server_port,
-        agent_name=args.agent_name,
-        chat_host=args.chat_host,
+        agent_name=agent_name,
+        chat_host=chat_host,
         chat_port=args.chat_port,
-        chat_name=args.chat_name,
+        chat_name=chat_name,
         workdir=Path(args.workdir).resolve(),
     )
     agent.run()
+
+
+def _prompt_required(label: str) -> str:
+    while True:
+        value = input(f"{label}: ").strip()
+        if value:
+            return value
+        print("[ERROR] This value is required.")
+
+
+def _prompt_default(label: str, default: str) -> str:
+    value = input(f"{label} [{default}]: ").strip()
+    return value or default
 
 
 if __name__ == "__main__":
